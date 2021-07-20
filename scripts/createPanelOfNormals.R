@@ -132,10 +132,10 @@ for (i in 1:length(files)){
 	}
 	
 	## Normalize chrX -- if male sex ##
-	if (gender == "male"){
-		chrXMedian <- gender$chrXMedian
-		chrXStr <- grep("X", chrs, value = TRUE)
-		chrXInd <- as.character(seqnames(normalGR)) == chrXStr	
+	chrXStr <- grep("X", chrs, value = TRUE)
+	chrXInd <- as.character(seqnames(normalGR)) == chrXStr		
+	if (gender$gender == "male"){
+		chrXMedian <- gender$chrXMedian		
 		values(normalGR)[[sid]][chrXInd] <- values(normalGR)[[sid]][chrXInd] - chrXMedian
 	}
 	
@@ -145,7 +145,7 @@ for (i in 1:length(files)){
 
 
 }
-
+print (info)
 
 mat <- values(normalGR)
 if (method == "median"){
@@ -181,7 +181,7 @@ midPts <- starts + ((ends - starts) / 2) + 1
 seqInfo <- Seqinfo(genome = genomeBuild)
 seqlevelsStyle(seqInfo) <- genomeStyle
 
-print(seqInfo)
+#print(seqInfo)
 
 seqInfo <- keepSeqlevels(seqInfo, chrs)
 if (plotChrPanels){
