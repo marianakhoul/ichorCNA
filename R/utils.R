@@ -2,529 +2,630 @@
 # author: Gavin Ha, Ph.D.
 #         Fred Hutchinson Cancer Research Center
 # contact: <gha@fredhutch.org>
-# website: https://GavinHaLab.org
+# # website: https://GavinHaLab.org
 #
 # author: Justin Rhoades, Broad Institute
 #
-# ichorCNA website: https://github.com/GavinHaLab/ichorCNA
+# ichorCNA website: https://github.com/broadinstitute/ichorCNA
 # date:   January 6, 2020
-#
 # description: Hidden Markov model (HMM) to analyze Ultra-low pass whole genome sequencing (ULP-WGS) data.
-# This script is the main script to run the HMM.
+# This file contains R functions for plotting.
 
-####################################
-##### FUNCTION TO FILTER CHRS ######
-####################################
-# updated for GRanges #
-keepChr <- function(tumour_reads, chrs = c(1:22,"X","Y")){	
-	tumour_reads <- keepSeqlevels(tumour_reads, chrs, pruning.mode="tidy")
-	sortSeqlevels(tumour_reads)
-	return(sort(tumour_reads))
-}
+## plot solutions for all samples
+plotSolutions <- function(hmmResults.cor, tumour_copy, chrs, outDir, counts,
+                          logR.column = "logR", call.column = "event", likModel = "t",
+                          plotSegs = TRUE, numSamples=1, plotFileType="pdf", 
+                          plotYLim=c(-2,2), seqinfo = NULL,
+                          estimateScPrevalence=FALSE, maxCN){
+  ## for each sample ##
+  for (s in 1:numSamples){
+    iter <- hmmResults.cor$results$iter
+    id <- names(hmmResults.cor$cna)[s]
+    ploidyEst <- hmmResults.cor$results$phi[s, iter]
+    normEst <- hmmResults.cor$results$n[s, iter]
+    purityEst <- 1 - normEst
+    ploidyAll <- (1 - normEst) * ploidyEst + normEst * 2
 
-filterEmptyChr <- function(gr){
-	require(plyr)
-	ind <- daply(as.data.frame(gr), .variables = "seqnames", .fun = function(x){
-	  rowInd <- apply(x[, 6:ncol(x), drop = FALSE], 1, function(y){
-	    sum(is.na(y)) == length(y)
-	  })
-	  sum(rowInd) == nrow(x)
-	})	
-	return(keepSeqlevels(gr, value = names(which(!ind))))
-}
+    outPlotFile <- paste0(outDir, "/", id, "/", id, "_genomeWide")
+    plotGWSolution(hmmResults.cor, s, outPlotFile, seqinfo, 
+    			   logR.column = logR.column, call.column = call.column, 
+    			   plotFileType=plotFileType, plotYLim=plotYLim,
+                   plotSegs=plotSegs, estimateScPrevalence=estimateScPrevalence, main=id)
 
-####################################
-##### FUNCTION GET SEQINFO ######
-####################################
-getSeqInfo <- function(genomeBuild = "hg19", genomeStyle = "NCBI", chrs = c(1:22, "X")){
-	bsg <- paste0("BSgenome.Hsapiens.UCSC.", genomeBuild)
-	if (!require(bsg, character.only=TRUE, quietly=TRUE, warn.conflicts=FALSE)) {
-		seqinfo <- Seqinfo(genome=genomeBuild)
-	} else {
-		seqinfo <- seqinfo(get(bsg))
-	}
-	chrs <- as.character(chrs)
-	seqlevelsStyle(seqinfo) <- genomeStyle
-	seqlevelsStyle(chrs) <- genomeStyle
-	seqinfo <- keepSeqlevels(seqinfo, value = chrs)
-	#seqinfo <- cbind(seqnames = seqnames(seqinfo), as.data.frame(seqinfo))
-	return(seqinfo)	
-}
-
-##################################################
-##### FUNCTION TO FILTER CENTROMERE REGIONS ######
-##################################################
-excludeCentromere <- function(x, centromere, flankLength = 0, genomeStyle = "NCBI"){
-	require(GenomeInfoDb)
-	colnames(centromere)[1:3] <- c("seqnames","start","end")
-	centromere$start <- centromere$start - flankLength
-	centromere$end <- centromere$end + flankLength
-	centromere <- as(centromere, "GRanges")
-	seqlevelsStyle(centromere) <- genomeStyle
-	centromere <- sort(centromere)	
-	hits <- findOverlaps(query = x, subject = centromere)
-	ind <- queryHits(hits)
-	message("Removed ", length(ind), " bins near centromeres.")
-	if (length(ind) > 0){
-		x <- x[-ind, ]
-	}
-	return(x)
-}
-
-##################################################
-##### FUNCTION TO USE NCBI CHROMOSOME NAMES ######
-##################################################
-## deprecated ##
-setGenomeStyle <- function(x, genomeStyle = "NCBI", species = "Homo_sapiens"){
-        require(GenomeInfoDb)
-        #chrs <- genomeStyles(species)[c("NCBI","UCSC")]
-        if (!genomeStyle %in% seqlevelsStyle(as.character(x))){
-        x <- suppressWarnings(mapSeqlevels(as.character(x),
-                                        genomeStyle, drop = FALSE)[1,])
+    ### PLOT THE LOG RATIO DATA ALONG WITH COLOUR-CODING FOR PREDICTED CALLS ###
+    for (i in chrs){
+      ## PLOT CNA BY CHROMOSOME ##
+      outPlot <- paste0(outDir,"/",id,"/",id,"_CNA_chr",i)
+      if (plotFileType == "png"){ 
+        outPlot <- paste0(outPlot, ".png")
+        png(outPlot,width=15,height=5,units="in",res=300)
+      }else{
+        outPlot <- paste0(outPlot, ".pdf")
+        pdf(outPlot,width=15,height=5)
+      }			
+      par(mfrow=c(1,1))
+      plotCNlogRByChr(hmmResults.cor$cna[[s]], segs=hmmResults.cor$results$segs[[s]], chr=i,
+                      ploidy = ploidyAll, plotSegs=plotSegs, seqinfo = seqinfo,
+                      logR.column = logR.column, call.column = call.column, 
+                      cytoBand=T, yrange=plotYLim, cex=0.75, spacing=8)	
+      dev.off()
     }
 
-    autoSexMChr <- extractSeqlevelsByGroup(species = species,
-                                style = genomeStyle, group = "all")
-    x <- x[x %in% autoSexMChr]
-    return(x)
-}
-
-wigToGRanges <- function(wigfile, verbose = TRUE){
-  output <- tryCatch({
-    input <- readLines(wigfile, warn = FALSE)
-    breaks <- c(grep("fixedStep", input), length(input) + 1)
-    temp <- NULL
-    span <- NULL
-    for (i in 1:(length(breaks) - 1)) {
-      data_range <- (breaks[i] + 1):(breaks[i + 1] - 1)
-      track_info <- input[breaks[i]]
-      if (verbose) { message(paste("Parsing:", track_info)) }
-      tokens <- strsplit(
-        sub("fixedStep chrom=(\\S+) start=(\\d+) step=(\\d+) span=(\\d+)",
-            "\\1 \\2 \\3 \\4", track_info, perl = TRUE), " ")[[1]]
-      span <- as.integer(tokens[4])
-      chr <- rep.int(tokens[1], length(data_range))
-      pos <- seq(from = as.integer(tokens[2]), by = as.integer(tokens[3]),
-                 length.out = length(data_range))
-      val <- as.numeric(input[data_range])
-      temp <- c(temp, list(data.frame(chr, pos, val)))
+    ### PLOT THE GENOME-WIDE CORRECTION COMPARISONS ###
+    outPlotFile <- paste0(outDir,"/",id,"/",id,"_genomeWideCorrection")
+    if (plotFileType == "png"){ 
+      outPlotFile <- paste0(outPlotFile, ".png")
+      png(outPlotFile,width=10,height=12,units="in",res=300)
+    }else{
+      outPlotFile <- paste0(outPlotFile, ".pdf")
+      pdf(outPlotFile,width=10,height=12)
     }
-    if (verbose) { message("Sorting by decreasing chromosome size") }
-    lengths <- as.integer(lapply(temp, nrow))
-    temp <- temp[order(lengths, decreasing = TRUE)]
-    temp = do.call("rbind", temp)
-    output <- GenomicRanges::GRanges(ranges = IRanges(start = temp$pos, width = span),
-                         seqnames = temp$chr, value = temp$val)
-    return(output)
-  }, error = function(e){
-    message("wigToGRanges: WIG file '", wigfile, "' not found.")
-    return(NULL)
-  })
-  return(output)
-}
-
-
-loadReadCountsFromWig <- function(counts, chrs = c(1:22, "X", "Y"), gc = NULL, map = NULL, repTime = NULL, centromere = NULL, flankLength = 100000, targetedSequences = NULL, genomeStyle = "NCBI", applyCorrection = TRUE, mapScoreThres = 0.9, chrNormalize = c(1:22, "X", "Y"), fracReadsInChrYForMale = 0.002, chrXMedianForMale = -0.5, useChrY = TRUE){
-	require(HMMcopy)
-	require(GenomeInfoDb)
-	seqlevelsStyle(counts) <- genomeStyle
-	counts.raw <- counts	
-	counts <- keepChr(counts, chrs)
-	
-	if (!is.null(gc)){ 
-		seqlevelsStyle(gc) <- genomeStyle
-		tryCatch({
-		  counts$gc <- keepChr(gc, chrs)$value
-		}, error = function(e){
-		  stop("loadReadCountsFromWig: Number of bins in gc different than input wig.")
-		})
-	}
-	if (!is.null(map)){ 
-		seqlevelsStyle(map) <- genomeStyle
-		tryCatch({
-		  counts$map <- keepChr(map, chrs)$value
-		}, error = function(e){
-		  stop("loadReadCountsFromWig: Number of bins in map different than input wig.")
-		})
-	}
-	if (!is.null(repTime)){
-	  seqlevelsStyle(repTime) <- genomeStyle
-	  tryCatch({
-	    counts$repTime <- keepChr(repTime, chrs)$value
-	    #counts$repTime <- 1 / (1 + exp(-1 * counts$repTime)) # logistic transformation
-	    #counts$repTime <- counts$repTime # use the inverse
-	  }, error = function(e){
-	    stop("loadReadCountsFromWig: Number of bins in repTime different than input wig.")
-	  })
-	}
-	colnames(values(counts))[1] <- c("reads")
-	
-	# remove centromeres
-	if (!is.null(centromere)){ 
-		counts <- excludeCentromere(counts, centromere, flankLength = flankLength, genomeStyle=genomeStyle)
-	}
-	# keep targeted sequences
-	if (!is.null(targetedSequences)){
-		colnames(targetedSequences)[1:3] <- c("chr", "start", "end")
-		targetedSequences.GR <- as(targetedSequences, "GRanges")
-		seqlevelsStyle(targetedSequences.GR) <- genomeStyle
-		countsExons <- filterByTargetedSequences(counts, targetedSequences.GR)
-		counts <- counts[countsExons$ix,]
-	}
-	gender <- NULL
-	gc.fit <- NULL
-	map.fit <- NULL
-	rep.fit <- NULL
-	if (applyCorrection){
-		## correct read counts ##
-		cor.counts <- correctReadCounts(counts, mappability = 0, chrNormalize = chrNormalize)
-		if (!is.null(map)) {
-		  ## filter bins by mappability
-		  cor.counts$cor <- filterByMappabilityScore(cor.counts$cor, map=map, mapScoreThres = mapScoreThres)
-		}
-		counts <- cor.counts$cor
-		gc.fit <- cor.counts$gc.fit
-		map.fit <- cor.counts$map.fit
-		rep.fit <- cor.counts$rep.fit
-		## get gender ##
-		gender <- getGender(counts.raw, counts, gc, map, fracReadsInChrYForMale = fracReadsInChrYForMale, 
-							chrXMedianForMale = chrXMedianForMale, useChrY = useChrY,
-							centromere=centromere, flankLength=flankLength, targetedSequences = targetedSequences,
-							genomeStyle = genomeStyle)
+    plotCorrectionGenomeWide(tumour_copy[[s]], seqinfo = seqinfo, pch = ".", xlab = "Chromosomes")
+    dev.off()
+    
+    ### PLOT THE CORRECTION COMPARISONS BY CHR ###
+    for (i in chrs){
+      outPlotFile <- paste0(outDir,"/",id,"/",id,"_correction_chr", i)
+      if (plotFileType == "png"){ 
+        outPlotFile <- paste0(outPlotFile, ".png")
+        png(outPlotFile,width=10,height=12,units="in",res=300)
+      }else{
+        outPlotFile <- paste0(outPlotFile, ".pdf")
+        pdf(outPlotFile,width=10,height=12)
+      }
+      plotCorrectionGenomeWide(tumour_copy[[s]], seqinfo = seqinfo, chr = i, 
+                               cex = 3, pch = ".", xlab = paste0("Chr", i))
+      dev.off()
     }
-  return(list(counts = counts, gender = gender, gc.fit = gc.fit, map.fit = map.fit, rep.fit = rep.fit))
-}
+    
+    ### PLOT FIT COMPARISON ### only if replication correction was performed
+    if (!is.null(counts[[s]]$counts$cor.rep) && length(counts[[s]]$counts) > 1e4){
+      for (i in chrs){
+        outPlotFile <- paste0(outDir, "/", id, "/", id, "_fit_chr", i)
+        if (plotFileType == "png"){ 
+          outPlotFile <- paste0(outPlotFile, ".png")
+          png(outPlotFile,width=10,height=12,units="in",res=300)
+        }else{
+          outPlotFile <- paste0(outPlotFile, ".pdf")
+          pdf(outPlotFile,width=10,height=12)
+        }
+        plotFitCompareByChr(counts[[s]], chr = i, covar = "repTime", covarName = "Replication Timing",
+                                        before = "cor.map", beforeName = "Mappability-Corrected",
+                                        after = "cor.rep", afterName = "Replication-Timing-Corrected")
+        dev.off()
+      }
+    }
 
-filterByMappabilityScore <- function(counts, map, mapScoreThres = 0.9){
-	message("Filtering low uniqueness regions with mappability score < ", mapScoreThres)
-	counts <- counts[counts$map >= mapScoreThres, ]
-	return(counts)
-}
+    ### PLOT THE BIAS ###
+    outPlotFile <- paste0(outDir,"/",id,"/",id,"_bias")
+    if (plotFileType == "png"){ 
+      outPlotFile <- paste0(outPlotFile, ".png")
+      png(outPlotFile,width=7,height=7,units="in",res=300)
+    }else{
+      outPlotFile <- paste0(outPlotFile, ".pdf")
+      pdf(outPlotFile,width=7,height=7)
+    }
+    par(mfrow = c(3, 2))
+    try(plotCovarBias(counts[[s]], covar = "gc", before = "reads", 
+                    after = "cor.gc", fit = "gc.fit", xlab = "GC Content",
+                    pch = 20, cex = 0.5, mfrow = NULL),
+    silent = TRUE)
+    try(plotCovarBias(counts[[s]], covar = "map", before = "cor.gc", 
+                      after = "cor.map", fit = NULL, xlab = "Mappability Score",
+                      pch = 20, cex = 0.5, mfrow = NULL),
+    silent = TRUE)
+    try(plotCovarBias(counts[[s]], covar = "repTime", before = "cor.map", 
+                      after = "cor.rep", fit = "rep.fit", xlab = "Replication Timing", 
+                      pch = 20, cex = 0.5, mfrow = NULL),
+    silent = TRUE)
+    dev.off()
 
-filterByTargetedSequences <- function(counts, targetedSequences){
- ### for targeted sequencing (e.g.  exome capture),
-    ### ignore bins with 0 for both tumour and normal
-    ### targetedSequence = GRanges object
-    ### containing list of targeted regions to consider;
-    ### 3 columns: chr, start, end
-					
-	hits <- findOverlaps(query = counts, subject = targetedSequences)
-	keepInd <- unique(queryHits(hits))    
-
-	return(list(counts=counts, ix=keepInd))
-}
-
-selectFemaleChrXSolution <- function(){
-	
-}
-
-##################################################
-### FUNCTION TO DETERMINE GENDER #################
-##################################################
-getGender <- function(rawReads, normReads, gc, map, fracReadsInChrYForMale = 0.002, chrXMedianForMale = -0.5, useChrY = TRUE,
-					  centromere=NULL, flankLength=1e5, targetedSequences=NULL, genomeStyle="NCBI"){
-	chrXStr <- grep("X", runValue(seqnames(normReads)), value = TRUE)
-	chrYStr <- grep("Y", runValue(seqnames(rawReads)), value = TRUE)
-	chrXInd <- as.character(seqnames(normReads)) == chrXStr
-	if (sum(chrXInd) > 1){ ## if no X 
-		chrXMedian <- median(normReads[chrXInd, ]$copy, na.rm = TRUE)
-		# proportion of reads in chrY #
-		tumY <- loadReadCountsFromWig(rawReads, chrs=chrYStr, genomeStyle=genomeStyle,
-				gc=gc, map=map, applyCorrection = FALSE, centromere=centromere, flankLength=flankLength, 
-				targetedSequences=targetedSequences)$counts
-		chrYCov <- sum(tumY$reads) / sum(rawReads$value)
-		if (chrXMedian < chrXMedianForMale){
-			if (useChrY && (chrYCov < fracReadsInChrYForMale)){ #trumps chrX if using chrY
-					gender <- "female"  
-			}else{
-				gender <- "male" # satisfies decreased chrX log ratio and/or increased chrY coverage
-			}
-		}else{
-			gender <- "female" # chrX is provided but does not satisfies male critera
-		}
-	}else{
-		gender <- "unknown" # chrX is not provided
-		chrYCov <- NA
-		chrXMedian <- NULL
-	}
-	return(list(gender=gender, chrYCovRatio=chrYCov, chrXMedian=chrXMedian))
-}
-	
-	
-normalizeByPanelOrMatchedNormal <- function(tumour_copy, chrs = c(1:22, "X", "Y"), 
-      normal_panel = NULL, normal_copy = NULL, gender = "female", normalizeMaleX = FALSE){
-    genomeStyle <- seqlevelsStyle(tumour_copy)[1]
-    seqlevelsStyle(chrs) <- genomeStyle
- 	### COMPUTE LOG RATIO FROM MATCHED NORMAL OR PANEL AND HANDLE CHRX ###
-	chrXInd <- grep("X", as.character(seqnames(tumour_copy)))
-	chrXMedian <- median(tumour_copy[chrXInd, ]$copy, na.rm = TRUE)
-
-	# matched normal and panel and male, then compute normalized chrX median 
-	# if (!is.null(normal_copy) && !is.null(normal_panel) && gender=="male"){
-	# 		message("Normalizing by matched normal for ChrX")
-	# 		chrX.MNnorm <- tumour_copy$copy[chrXInd] - normal_copy$copy[chrXInd]
-	# 		chrXMedian.MNnorm <- median(chrX.MNnorm, na.rm = TRUE)
-	# }
-	# MATCHED NORMAL, normalize by matched normal
-	# if both normal and panel, then this step is the second normalization
-	if (!is.null(normal_copy)){
-		message("Normalizing Tumour by Normal")
-		tumour_copy$copy <- tumour_copy$copy - normal_copy$copy
-		rm(normal_copy)
-	}else if (is.null(normal_copy) && gender == "male" && normalizeMaleX){
-		# if male, and no matched normal, then just normalize chrX to median 
-		tumour_copy$copy[chrXInd] <- tumour_copy$copy[chrXInd] - chrXMedian
-	}
-	# PANEL, then normalize by panel instead of matched normal 
-	if (!is.null(normal_panel)){
-		message("Normalizing Tumour by Panel of Normals (PoN)")
-		## load in IRanges object, then convert to GRanges
-		panel <- readRDS(normal_panel)
-		seqlevelsStyle(panel) <- genomeStyle
-		panel <- keepChr(panel, chr = chrs)
-		chrXInd.panel <- grep("X", as.character(seqnames(panel)))
-        # intersect bins in sample and panel
-        hits <- findOverlaps(query = tumour_copy, subject = panel, type="equal")
-        #tumour_copy <- tumour_copy[queryHits(hits),]
-        #panel <- panel[subjectHits(hits),]
-        #if (!is.null(normal_copy)){ # if matched normal provided, then subset it too
-        #	normal_copy <- normal_copy[queryHits(hits),]
-        #}
-        ### Normalize by panel median
-        if (normalizeMaleX == FALSE && gender == "male"){  # do not normalize chrX with PoN
-        	autoChrInd.tum <- setdiff(queryHits(hits), chrXInd)
-        	autoChrInd.panel <- setdiff(subjectHits(hits), chrXInd.panel)
-			tumour_copy$copy[chrXInd.panel] <- tumour_copy$copy[chrXInd.panel] - panel$Median[chrXInd.panel]
-		}else { # female OR normalizeMaleX - normalize chrX with PoN
-			tumour_copy$copy[queryHits(hits)] <- tumour_copy$copy[queryHits(hits)] - 
-				panel$Median[subjectHits(hits)]
-		}
-	}
-	
-	# }else if (gender == "male" && exists("chrXMedian.MNnorm")){
-	# 	# if male, then shift chrX by +chrXMedian.MNnorm
-	# 	# only need if matched normal doesn't 
-	# 	tumour_copy$copy[chrXInd] <- tumour_copy$copy[chrXInd] + chrXMedian.MNnorm
-	# }
-	
-	return(tumour_copy)
-}
-
-##################################################
-###### FUNCTION TO CORRECT GC/MAP BIASES ########
-##################################################
-correctReadCounts <- function(x, chrNormalize = c(1:22), mappability = 0.9, samplesize = 50000,
-    verbose = TRUE) {
-  if (length(x$reads) == 0 | length(x$gc) == 0) {
-    stop("Missing one of required columns: reads, gc")
+    ### PLOT TPDF ##
+    outPlotFile <- paste0(outDir,"/",id,"/",id,"_tpdf.pdf")
+    pdf(outPlotFile)
+    plotParam(mus = unique(hmmResults.cor$results$mus[, s, iter]), 
+              lambdas = hmmResults.cor$results$lambdas[, s, iter], 
+              vars = hmmResults.cor$results$vars[, s],
+              jointStates = hmmResults.cor$results$param$jointStates[, s],
+              likModel = likModel,
+              subclone = hmmResults.cor$results$param$ct.sc.status,
+              nu = hmmResults.cor$results$param$nu, copy.states = hmmResults.cor$results$param$ct)
+    dev.off()
   }
-  chrInd <- as.character(seqnames(x)) %in% chrNormalize
-  if(verbose) { message("Applying filter on data...") }
-  x$valid <- TRUE
-  x$valid[x$reads <= 0 | x$gc < 0] <- FALSE
-  x$ideal <- TRUE
-  routlier <- 0.01
-  range <- quantile(x$reads[x$valid & chrInd], prob = c(0, 1 - routlier), na.rm = TRUE)
-  doutlier <- 0.001
-  domain <- quantile(x$gc[x$valid & chrInd], prob = c(doutlier, 1 - doutlier), na.rm = TRUE)
-  if (length(x$map) != 0) {
-    x$ideal[!x$valid | x$map < mappability | x$reads <= range[1] |
-      x$reads > range[2] | x$gc < domain[1] | x$gc > domain[2]] <- FALSE
-  } else {
-    x$ideal[!x$valid | x$reads <= range[1] |
-      x$reads > range[2] | x$gc < domain[1] | x$gc > domain[2]] <- FALSE
-  }
+}
 
-  if (verbose) { message("Correcting for GC bias...") }
-  set <- which(x$ideal & chrInd)
-  select <- sample(set, min(length(set), samplesize))
-  rough <- loess(x$reads[select] ~ x$gc[select], span = 0.03)
-  i <- seq(0, 1, by = 0.001)
-  final.gc <- loess(predict(rough, i) ~ i, span = 0.3)
-  x$cor.gc <- x$reads / predict(final.gc, x$gc)
 
-  final.map <- NULL
-  if (length(x$map) != 0) {
-    if (verbose) { message("Correcting for mappability bias...") }
-    coutlier <- 0.01
-    range <- quantile(x$cor.gc[which(x$valid & chrInd)], prob = c(0, 1 - coutlier), na.rm = TRUE)
-    set <- which(x$cor.gc < range[2] & chrInd)
-    select <- sample(set, min(length(set), samplesize))
-    final.map <- approxfun(lowess(x$map[select], x$cor.gc[select]))
-    x$cor.map <- x$cor.gc / final.map(x$map)
-  } else {
-    x$cor.map <- x$cor.gc
+plotGWSolution <- function(hmmResults.cor, s, outPlotFile, plotFileType="pdf", 
+						   logR.column = "logR", call.column = "event",
+						   seqinfo = NULL, plotSegs = TRUE, 
+               cex = 0.5, cex.axis = 1.5, cex.lab=1.5, cex.text=1.5,
+               plotYLim=c(-2,2), estimateScPrevalence, main=NULL, spacing=4,
+               turnDevOn=TRUE, turnDevOff=TRUE){
+    ## plot genome wide figures for each solution ##
+    iter <- hmmResults.cor$results$iter
+    ploidyEst <- hmmResults.cor$results$phi[s, iter]
+    normEst <- hmmResults.cor$results$n[s, iter]
+    purityEst <- 1 - normEst
+    ploidyAll <- (1 - normEst) * ploidyEst + normEst * 2
+    subclone <- 1 - hmmResults.cor$results$sp[s, iter]
+    #outPlotFile <- paste0(outDir, "/", id, "/", id, "_genomeWide")
+    if (turnDevOn){
+      if (plotFileType == "png"){ 
+          outPlotFile <- paste0(outPlotFile, ".png")
+          png(outPlotFile,width=20,height=6,units="in",res=300)
+      }else{
+          outPlotFile <- paste0(outPlotFile, ".pdf")
+          pdf(outPlotFile,width=20,height=6)
+      } 
+    }
+    if (par()$mfrow[1] > 1){ # more than one plot in figure
+      lines <- c(0.25, -1.5, -3.25)
+    }else{       
+      lines <- c(0.25, -1, -2.25)
+    }
+    #par(oma=c(0, 0, 2, 0))
+    if (plotSegs){
+    	segsToUse <- hmmResults.cor$results$segs[[s]]
+    }else{
+    	segsToUse <- NULL
+    }
+    plotCNlogRByChr(hmmResults.cor$cna[[s]], segs = segsToUse, plotSegs=plotSegs, seqinfo=seqinfo,
+                    param = hmmResults.cor$results$param, chr=NULL,
+                    logR.column = logR.column, call.column = call.column,  
+                    cex = cex, cex.axis = cex.axis, cex.lab=cex.lab,
+                    ploidy = ploidyAll, cytoBand=T, yrange=plotYLim, spacing=spacing, main=NULL)  #ylim for plot
+    annotStr <- paste0("Tumor Fraction: ", signif(purityEst, digits=4), ", Ploidy: ", signif(ploidyEst, digits=3))
+    if (!is.null(coverage)){
+      annotStr <- paste0(annotStr, ", Coverage: ", signif(coverage, digits=2))
+    }
+    mtext(line=lines[1], main, cex=cex.text)
+    mtext(line=lines[2], annotStr, cex=cex.text)
+    if (estimateScPrevalence){
+      sampleBins <- hmmResults.cor$cna[[s]]
+      #sampleBins <- sampleBins[sampleBins$chr %in% chrTrain, ]
+      subBinCount <- sum(sampleBins$subclone.status) 
+      fracGenomeSub <- subBinCount / nrow(sampleBins)
+      fracCNAsub <- subBinCount / sum(sampleBins$copy.number != 2)
+      if (fracGenomeSub > 0){
+        annotSubStr <- paste0("Subclone Fraction: ", signif(subclone, digits=3), 
+                              ", Frac. Genome Subclonal: ", format(round(fracGenomeSub, 2), nsmall = 2),
+                              ", Frac. CNA Subclonal: ", format(round(fracCNAsub, 2), nsmall = 2))
+        mtext(line=lines[3], annotSubStr, cex=cex.text)
+      }
+    }
+    if (turnDevOff){
+        dev.off()
+    }
+}
+
+
+#data is the output format of HMMcopy (*.cna.txt)
+#cytoBand = {T, F}
+#alphaVal = [0,1]
+#geneAnnot is a dataframe with 4 columns: geneSymbol, chr, start, stop
+#spacing is the distance between each track
+plotCNlogRByChr <- function(dataIn, segs, param = NULL, logR.column = "logR", 
+  call.column = "event", plotSegs = TRUE, seqinfo=NULL, chr=NULL, ploidy = NULL, 
+  geneAnnot=NULL, yrange=c(-4,6), xlim=NULL, xaxt = "n", cex = 0.5, cex.axis = 1.5, cex.lab=1.5, gene.cex = 0.5, 
+  plot.title = NULL, spacing=4, cytoBand=T, alphaVal=1, main){
+  #color coding
+  alphaVal <- ceiling(alphaVal * 255); class(alphaVal) = "hexmode"
+  alphaSubcloneVal <- ceiling(alphaVal / 2 * 255); class(alphaVal) = "hexmode"
+  cnCol <- c("#00FF00","#006400","#0000FF","#8B0000",rep("#FF0000", 1001))
+  subcloneCol <- c("#00FF00")
+  cnCol <- paste(cnCol,alphaVal,sep="")
+  names(cnCol) <- c("HOMD","HETD","NEUT","GAIN","AMP","HLAMP",paste0("HLAMP", 2:1000))
+#  segCol <- cnCol
+#  ## add in colors for subclone if param provided
+#  if (!is.null(param)){
+#    ind <- ((which.max(param$ct) + 1) : length(param$ct)) + 1
+#    cnCol[ind] <- paste0(cnCol[ind], alphaSubcloneVal / 2)
+#    segCol[ind] <- "#00FF00"
+#  }
+  # adjust for ploidy #
+  if (!is.null(ploidy)){
+    dataIn[, logR.column] <- as.numeric(dataIn[, logR.column]) + log2(ploidy / 2)
+    
+    if (!is.null(segs)){
+      segs[, "median"] <- segs[, "median"] + log2(ploidy / 2)
+    }
   }
   
-  final.rep <- NULL
-  if (length(x$repTime) != 0){
-    if (verbose) { message("Correcting for replication timing bias...") }
-    coutlier <- 0.01
-    range <- quantile(x$cor.map[which(x$valid & chrInd)], prob = c(0, 1 - coutlier), na.rm = TRUE)
-    domain.rep <- quantile(x$repTime[x$valid & chrInd], prob = c(doutlier, 1 - doutlier), na.rm = TRUE)
-    set <- which(x$cor.map < range[2] & chrInd)
-    select <- sample(set, min(length(set), samplesize))
-    rough <- loess(x$cor.map[select] ~ x$repTime[select], span = 0.03)
-    i <- seq(domain.rep[1], domain.rep[2], by = 0.001)
-    final.rep <- loess(predict(rough, i) ~ i, span = 0.3)
-    x$cor.rep <- x$cor.map / predict(final.rep, x$repTime)
-  }else{
-    x$cor.rep <- x$cor.map
+  
+  if (!is.null(chr)){
+    for (i in chr){
+      
+      dataByChr <- dataIn[dataIn[,"chr"]==as.character(i),]
+      
+      #plot the data
+      #if (outfile!=""){ pdf(outfile,width=10,height=6) }
+      par(mar=c(spacing,8,spacing,2))
+      #par(xpd=NA)
+      coord <- (as.numeric(dataByChr[,"end"]) + as.numeric(dataByChr[,"start"]))/2
+      if (is.null(xlim)){
+        xlim <- c(1,as.numeric(dataByChr[dim(dataByChr)[1],"start"]))
+        xaxt <- "n"
+      }
+      if (is.null(plot.title)){
+        plot.title <- paste("Chromosome ",i,sep="")
+      }
+      ## plot logR for bins ##
+      plot(coord,as.numeric(dataByChr[, logR.column]),col=cnCol[dataByChr[, call.column]],
+           pch=16, ylim=yrange,
+           xlim=xlim, xaxt = xaxt, xlab="",ylab="Copy Number (log2 ratio)",
+           cex.lab=cex.lab,cex.axis=cex.axis, cex=cex,las=1)
+      title(plot.title, line = 1.25, xpd=NA, cex.main=1.5)
+      ## plot centre line ##
+      lines(c(1,as.numeric(dataByChr[dim(dataByChr)[1],3])),rep(0,2),type="l",col="grey",lwd=0.75)
+      if (!is.null(segs) & plotSegs){
+        segsByChr <- segs[segs[,"chr"]==as.character(i),,drop=FALSE]
+        ind <- segsByChr$subclone.status == FALSE
+        apply(segsByChr[ind, ], 1, function(x){
+          lines(x[c("start","end")], rep(x["median"], 2), col = cnCol[x[call.column]], lwd = 3)
+          invisible()
+        })
+        if (sum(!ind) > 0){
+          apply(segsByChr[!ind, ], 1, function(x){
+            lines(x[c("start","end")], rep(x["median"], 2), col = subcloneCol, lwd = 3)
+            invisible()
+          })
+        }
+      }
+      
+      if (!is.null(geneAnnot)){
+        #par(xpd=F)
+        colnames(geneAnnot) <- c("Gene","Chr","Start","Stop")
+        geneAnnot <- geneAnnot[geneAnnot[,"Chr"]==chr,]
+        for (g in 1:dim(geneAnnot)[1]){
+          print(geneAnnot[g,"Gene"])
+          abline(v=as.numeric(geneAnnot[g,"Start"]),col="black",lty=3,xpd=F)
+          abline(v=as.numeric(geneAnnot[g,"Stop"]),col="black",lty=3,xpd=F)			
+          atP <- (as.numeric(geneAnnot[g,"Stop"]) - as.numeric(geneAnnot[g,"Start"]))/2 + as.numeric(geneAnnot[g,"Start"])
+          if (atP < dataByChr[1,"start"]){ atP <- dataByChr[1,"start"] }
+          else if (atP > dataByChr[dim(dataByChr)[1],"start"]){ atP <- dataByChr[dim(dataByChr)[1],"start"] }
+          mtext(geneAnnot[g,"Gene"],side=3,line=0,at=atP,cex=gene.cex)
+          
+        }
+      }
+    }
+  }else{  #plot for all chromosomes
+    par(mar=c(spacing,8,2,2))
+    #midpt <- (as.numeric(dataIn[,"end"]) + as.numeric(dataIn[,"start"]))/2
+    #coord <- getGenomeWidePositions(dataIn[,"chr"],midpt)
+    coord <- getGenomeWidePositions(dataIn[,"chr"],dataIn[,"end"], seqinfo)
+    plot(coord$posns,as.numeric(dataIn[, logR.column]),
+         col=cnCol[as.character(dataIn[,call.column])],pch=16,xaxt="n", ylim=yrange,
+         xlim=c(1,as.numeric(coord$posns[length(coord$posns)])),
+         xlab="",ylab="Copy Number (log2 ratio)",
+         cex.lab=cex.lab,cex.axis=cex.axis,cex.main=1.5,cex=cex,las=1,bty="n",
+         #main=dataIn[1,"sample"])
+         main=main)
+    #plot segments
+    
+    if (plotSegs){      
+      coordEnd <- getGenomeWidePositions(segs[, "chr"], segs[, "end"], seqinfo)
+      coordStart <- coordEnd$posns - (segs[, "end"] - segs[, "start"] + 1)
+      xlim <- as.numeric(c(1, coordEnd$posns[length(coordEnd$posns)]))
+      #col <- cnCol[as.numeric(segs[, "state"] + 1)]
+      col <- cnCol[segs[, call.column]]
+      #write.table(segs, "~/Documents/multisample/segs_debug.seg", quote=F, sep="\t", row.names=F)  ## debug
+      value <- as.numeric(segs[, "median"])
+      sc.status <- as.logical(segs[, "subclone.status"])
+      mat <- as.data.frame(cbind(coordStart, coordEnd$posns, value, sc.status, col))
+      rownames(mat) <- 1:nrow(mat)
+      ## clonal CN
+      ind <- mat$sc.status == FALSE
+      apply(mat[ind, ], 1, function(x){
+        lines(x[1:2], rep(x[3], 2), col = x[5], lwd = 3)
+        invisible()
+      })
+      ## subclonal CN
+      if (sum(!ind) > 0){
+        apply(mat[!ind, ], 1, function(x){
+          lines(x[1:2], rep(x[3], 2), col = subcloneCol, lwd = 3)
+          invisible()
+        })
+      }
+    }
+    lines(as.numeric(c(1,coord$posns[length(coord$posns)])),rep(0,2),type="l",col="grey",lwd=2)
+    if (plotSegs){
+   	  plotChrLines(dataIn[,"chr"],coordEnd$chrBkpt,yrange)
+   	}else{
+   		plotChrLines(dataIn[,"chr"],coord$chrBkpt,yrange)
+   	}
   }
-  x$copy <- x$cor.rep
-  x$copy[x$copy <= 0] = NA
-  x$copy <- log(x$copy, 2)
-  return(list(cor=x, gc.fit = final.gc, map.fit = final.map, rep.fit = final.rep))
 }
 
-## Recompute integer CN for high-level amplifications ##
-## compute logR-corrected copy number ##
-correctIntegerCN <- function(cn, segs, callColName = "event", 
-		purity, ploidy, cellPrev, maxCNtoCorrect.autosomes = NULL, 
-		maxCNtoCorrect.X = NULL, correctHOMD = TRUE, correctWholeChrXForMales = FALSE,
-		minPurityToCorrect = 0.2, gender = "male", chrs = c(1:22, "X")){
-	names <- c("HOMD","HETD","NEUT","GAIN","AMP","HLAMP", rep("HLAMP", 1000))
 
-	## set up chromosome style
-	autosomeStr <- grep("X|Y", chrs, value=TRUE, invert=TRUE)
-	chrXStr <- grep("X", chrs, value=TRUE)
-	
-	if (is.null(maxCNtoCorrect.autosomes)){
-		maxCNtoCorrect.autosomes <- max(segs[segs$chr %in% autosomeStr, "copy.number"], na.rm = TRUE)
-	}
-	if (is.null(maxCNtoCorrect.X) & gender == "female" & length(chrXStr) > 0){
-		maxCNtoCorrect.X <- max(segs[segs$chr == chrXStr, "copy.number"], na.rm=TRUE)
-	}
-	## correct log ratio and compute corrected CN
-	cellPrev.seg <- rep(1, nrow(segs))
-	cellPrev.seg[as.logical(segs$subclone.status)] <- 1 #cellPrev
-	segs$logR_Copy_Number <- logRbasedCN(segs[["median"]], purity, ploidy, cellPrev.seg, cn=2)
-	if (gender == "male" & length(chrXStr) > 0){ ## analyze chrX separately
-		ind.cnChrX <- which(segs$chr == chrXStr)
-		segs$logR_Copy_Number[ind.cnChrX] <- logRbasedCN(segs[["median"]][ind.cnChrX], purity, ploidy, cellPrev.seg[ind.cnChrX], cn=1)
-	}
+plotCorrectionGenomeWide <- function(correctOutput, seqinfo = NULL, chr = NULL, ...) {
+  
+  if (is.null(chr)){
+    midpt <- (start(correctOutput) + end(correctOutput))/2
+    coord <- getGenomeWidePositions(seqnames(correctOutput),midpt, seqinfo)
+  }else {
+    correctOutput <- correctOutput[seqnames(correctOutput) == chr]
+    midpt <- (start(correctOutput) + end(correctOutput))/2
+    coord <- getGenomeWidePositions(seqnames(correctOutput),midpt, seqinfo)
+  }
+  
+  mapCor <- !is.null(correctOutput$cor.map)
+  repTimeCor <- !is.null(correctOutput$cor.rep)
+  rows <- 2 + sum(c(mapCor, repTimeCor)) # must include uncorrected and GC panels
+  par(mfrow = c(rows, 1))
+  #correctOutput <- correctOutput[paste(chr)]
+  pos <- coord$posns
+  from <- min(coord$chrBkpt)
+  to <- max(coord$chrBkpt)
+  
+  copy <- correctOutput$reads / median(correctOutput$reads, na.rm = TRUE)
+  top <- quantile(copy, 0.99)
+  bot <- quantile(copy, 0.01)
+  
+  set <- which(correctOutput$valid & pos >= from & pos <= to &
+                 copy >= bot & copy <= top)
+  
+  y <- copy[set]
+  # plot Uncorrected read ratios (tum:norm)
+  m <- signif(mad(diff(y), na.rm = TRUE), digits = 3)
+  r <- c(min(y, na.rm = TRUE), max(y, na.rm = TRUE))
+  plot(pos[set], y, ylab = "Estimated Copy Ratio", xaxt="n",
+       main = paste("Uncorrected Readcount, MAD = ", m), ylim = r, ...)
+  if (is.null(chr)){
+    plotChrLines(as.vector(unique(seqnames(correctOutput))),coord$chrBkpt,yrange=r+c(-0.5,0.5))
+  }
+  # plot GC corrected read counts
+  m <- signif(mad(diff(correctOutput$cor.gc[set]), na.rm = TRUE), digits = 3)
+  plot(pos[set], correctOutput$cor.gc[set], xaxt="n",
+       ylab = "Estimated Copy Ratio",
+       main = paste("GC-corrected Readcount, MAD = ", m), ylim = r, ...)
+  if (is.null(chr)){
+    plotChrLines(as.vector(unique(seqnames(correctOutput))),coord$chrBkpt,yrange=r+c(-0.5,0.5))
+  }
+  # plot GC corrected + mappability corrected read counts
+  if (mapCor){
+    m <- signif(mad(diff(correctOutput$cor.map[set]), na.rm = TRUE), digits = 3)
+    plot(pos[set], correctOutput$cor.map[set], xaxt="n", ylab = "Estimated Copy Ratio",
+         main = paste("GC-corrected, mappability-corrected Readcount, MAD = ", m),
+         ylim = r, ...)
+    if (is.null(chr)){
+      plotChrLines(as.vector(unique(seqnames(correctOutput))),coord$chrBkpt,yrange=r+c(-0.5,0.5))
+    }
+  }
+  # plot GC corrected + mappability corrected + replication-timing corrected read counts
+  if (repTimeCor){
+    m <- signif(mad(diff(correctOutput$cor.rep[set]), na.rm = TRUE), digits = 3)
+    plot(pos[set], correctOutput$cor.rep[set], xaxt="n", ylab = "Estimated Copy Ratio",
+         main = paste("GC-corrected, mappability-corrected, replication-timing-corrected Readcount, MAD = ", m),
+         ylim = r, ...)
+    if (is.null(chr)){
+      plotChrLines(as.vector(unique(seqnames(correctOutput))),coord$chrBkpt,yrange=r+c(-0.5,0.5))
+    }
+  }
+}
 
-	## assign copy number to use - Corrected_Copy_Number
-	# 1) same ichorCNA calls for autosomes - initialize to no-change in copy number 
-	segs$Corrected_Copy_Number <- as.integer(segs$copy.number)
-	segs$Corrected_Call <- segs[[callColName]]
+##################################################
+### HELPER FUNCTION TO GET GENOME-WIDE COORDS ####
+##################################################
+plotChrLines <- function(chrs,chrBkpt,yrange, cex.axis=1.5){
+  #plot vertical chromosome lines
+  for (j in 1:length(chrBkpt)){
+    lines(rep(chrBkpt[j],2),yrange,type="l",lty=2,col="black",lwd=0.75)
+  }
+  numLines <- length(chrBkpt)
+  mid <- (chrBkpt[1:(numLines-1)]+chrBkpt[2:numLines])/2
+  #chrs <- mapSeqlevels(as.vector(chrs), style = "NCBI")
+  if (seqlevelsStyle(chrs)[1] != "NCBI"){
+  	seqlevelsStyle(chrs) <- "NCBI"
+  }
+  chrs <- sortSeqlevels(unique(chrs))
+  axis(side=1,at=mid,labels=c(chrs),cex.axis=cex.axis,tick=FALSE)
+}
 
-	ind.change <- c()
-	if (purity >= minPurityToCorrect){
-		# 2) ichorCNA calls adjusted for >= copies - HLAMP
-		# perform on all chromosomes
-		ind.cn <- which(segs$copy.number >= maxCNtoCorrect.autosomes | 
-						(segs$logR_Copy_Number >= maxCNtoCorrect.autosomes * 1.2 & !is.infinite(segs$logR_Copy_Number)))
-		segs$Corrected_Copy_Number[ind.cn] <- as.integer(round(segs$logR_Copy_Number[ind.cn]))
-		segs$Corrected_Call[ind.cn] <- names[segs$Corrected_Copy_Number[ind.cn] + 1]
-		ind.change <- c(ind.change, ind.cn)
-		
-		# 3) ichorCNA calls adjust for HOMD
-		if (correctHOMD){
-			ind.cn <- which(segs$chr %in% chrs & 
-				(segs$copy.number == 0 | segs$logR_Copy_Number == 1/2^6))
-			segs$Corrected_Copy_Number[ind.cn] <- as.integer(round(segs$logR_Copy_Number[ind.cn]))
-			segs$Corrected_Call[ind.cn] <- names[segs$Corrected_Copy_Number[ind.cn] + 1]
-			ind.change <- c(ind.change, ind.cn)
-		}
-		# 4) Re-adjust chrX copy number for males (females already handled above)
-		if (gender == "male" & length(chrXStr) > 0){
-			if (!correctWholeChrXForMales){ # correct all of chrX for males
-				ind.cn <- which(segs$chr == chrXStr)
-			}else{ # only highest chrX CN
-				ind.cn <- which(segs$chr == chrXStr & 
-					(segs$copy.number >= maxCNtoCorrect.X | segs$logR_Copy_Number >= maxCNtoCorrect.X * 1.2))
+# getGenomeWidePositions <- function(chrs,posns){  
+#   #create genome coordinate scaffold
+#   positions <- as.numeric(posns)
+#   chrsNum <- unique(chrs)
+#   chrBkpt <- rep(0,length(chrsNum)+1)
+#   for (i in 2:length(chrsNum)){
+#     chrInd <- which(chrs==chrsNum[i])
+#     prevChrPos <- positions[chrInd[1]-1]      
+#     chrBkpt[i] = prevChrPos
+#     positions[chrInd] = positions[chrInd] + prevChrPos
+#   }
+#   chrBkpt[i+1] <- positions[length(positions)]
+#   return(list(posns=positions,chrBkpt=chrBkpt))
+# }
+
+getGenomeWidePositions <- function(chrs, posns, seqinfo = NULL) {
+    # create genome coordinate scaffold
+    positions <- as.numeric(posns)
+    chrs <- as.character(chrs)
+    chrsNum <- unique(chrs)
+    chrBkpt <- rep(0, length(chrsNum) + 1)
+    prevChrPos <- 0
+    i <- 1
+    if (length(chrsNum) > 1){
+		for (i in 2:length(chrsNum)) {
+			chrInd <- which(chrs == chrsNum[i])
+			if (!is.null(seqinfo)){
+				prevChrPos <- seqlengths(seqinfo)[i-1] + prevChrPos
+			}else{
+				prevChrPos <- positions[chrInd[1] - 1]
 			}
-			segs$Corrected_Copy_Number[ind.cn] <- as.integer(round(segs$logR_Copy_Number[ind.cn]))
-			segs$Corrected_Call[ind.cn] <- names[segs$Corrected_Copy_Number[ind.cn] + 2]
-			ind.change <- c(ind.change, ind.cn)
+			chrBkpt[i] = prevChrPos
+			positions[chrInd] = positions[chrInd] + prevChrPos
 		}
-
-		# 5) Adjust copy number for inconsistent logR and copy number prediction (e.g. opposite copy number direction)
-	    # mostly affects outliers, which are short or single point segments
-	    # since chrX for males have all data corrected, it will by default not be included in this anyway
-	    # chrX for females are treated as regular diploid chromosomes here
-	    ind.seg.oppCNA <- which(((round(segs$logR_Copy_Number) < ploidy & segs$Corrected_Copy_Number > ploidy) | 
-	    				 		 (round(segs$logR_Copy_Number) > ploidy & segs$Corrected_Copy_Number < ploidy)) & 
-	    				   	 	(abs(round(segs$logR_Copy_Number) - segs$Corrected_Copy_Number) > 2))
-	    segs$Corrected_Copy_Number[ind.seg.oppCNA] <- as.integer(round(segs$logR_Copy_Number[ind.seg.oppCNA]))
-	    ind.change <- unique(c(ind.change, ind.seg.oppCNA))
 	}
-
-	## adjust the bin level data ##
-	# 1) assign the original calls
-	cn$Corrected_Copy_Number <- as.integer(cn$copy.number)
-	cn$Corrected_Call <- cn[[callColName]]
-	cellPrev.cn <- rep(1, nrow(cn))
-	cellPrev.cn[as.logical(cn$subclone.status)] <- cellPrev
-	cn$logR_Copy_Number <- logRbasedCN(cn[["logR"]], purity, ploidy, cellPrev.cn, cn=2)
-	if (gender == "male" & length(chrXStr) > 0){ ## analyze chrX separately
-		ind.cnChrX <- which(cn$chr == chrXStr)
-		cn$logR_Copy_Number[ind.cnChrX] <- logRbasedCN(cn[["logR"]][ind.cnChrX], purity, ploidy, cellPrev.cn[ind.cnChrX], cn=1)
-	}
-	if (purity >= minPurityToCorrect){
-		# 2) correct bins overlapping adjusted segs
-		ind.change <- unique(ind.change)
-		ind.overlapSegs <- c()
-		if (length(ind.change) > 0){		
-			cn.gr <- as(cn, "GRanges")
-			segs.gr <- as(segs, "GRanges")
-			hits <- findOverlaps(query = cn.gr, subject = segs.gr[ind.change])
-			cn$Corrected_Copy_Number[queryHits(hits)] <- segs$Corrected_Copy_Number[ind.change][subjectHits(hits)]
-			cn$Corrected_Call[queryHits(hits)] <- segs$Corrected_Call[ind.change][subjectHits(hits)]
-			ind.overlapSegs <- queryHits(hits)
-		}
-		# 3) correct bins that are missed as high level amplifications
-		ind.hlamp <- which(cn$copy.number >= maxCNtoCorrect.autosomes | 
-	 					(cn$logR_Copy_Number >= maxCNtoCorrect.autosomes * 1.2 & !is.infinite(cn$logR_Copy_Number)))
-		ind.cn <- unique(ind.hlamp, ind.overlapSegs)
-	 	cn$Corrected_Copy_Number[ind.cn] <- as.integer(round(cn$logR_Copy_Number[ind.cn]))
-	 	cn$Corrected_Call[ind.cn] <- names[cn$Corrected_Copy_Number[ind.cn] + 1]
-
-	 	#4) Correct bins that are clearly homozygous deletions
-		# hetd.median <- median(cn[cn$copy.number == 1, "logR"], na.rm = TRUE)
-		# hetd.sd <- sd(cn[cn$copy.number == 1, "logR"], na.rm = TRUE)
-		# ind.homd <- which(cn$logR_Copy_Number <= 1/2^6 & cn$logR <= hetd.median - 2 * hetd.sd)
-		# cn$Corrected_Copy_Number[ind.homd] <- 0
-		# cn$Corrected_Call[ind.homd] <- "HOMD"
-
-	 }
-	 
-	return(list(cn = cn, segs = segs))
+    chrBkpt[i + 1] <- positions[length(positions)]
+    return(list(posns = positions, chrBkpt = chrBkpt))
 }
 
+#stateCols <- function() {
+#  return(c("#74C476", "#238B45", "#00008B", "#A50F15", "#DE2D26", "#FB6A4A", "#FB6A4A", "#FB6A4A", "#FB6A4A", "#FB6A4A", "#FB6A4A", "#FB6A4A"))
+#}
 
-## compute copy number using corrected log ratio ##
-logRbasedCN <- function(x, purity, ploidyT, cellPrev=NA, cn = 2){
-	if (length(cellPrev) == 1 && is.na(cellPrev)){
-		cellPrev <- 1
-	}else{ #if cellPrev is a vector
-		cellPrev[is.na(cellPrev)] <- 1
-	}
-	ct <- (2^x 
-		* (cn * (1 - purity) + purity * ploidyT * (cn / 2)) 
-		- (cn * (1 - purity)) 
-		- (cn * purity * (1 - cellPrev))) 
-	ct <- ct / (purity * cellPrev)
-	ct <- sapply(ct, max, 1/2^6)
-	return(ct)
+# plotSegments <- function(correctOutput, segmentOutput,
+#                          chr = space(correctOutput)[1], ...){
+#   if (is.null(segmentOutput$segs)) {
+#     warning("Processed segments now found, automatically processing")
+#     segmentOutput$segs <- processSegments(segments$segs,
+#                                           space(correctOutput), start(correctOutput), end(correctOutput),
+#                                           correctOutput$copy)
+#   }
+#   
+#   segs <- segmentOutput$segs
+#   correctOutput$state <- segmentOutput$state
+#   cols <- stateCols()
+#   range <- quantile(correctOutput$copy, na.rm = TRUE, prob = c(0.01, 0.99))
+#   
+#   a <- correctOutput[as.character(chr)]
+#   b <- segs[segs$chr == chr, ]
+#   plot(start(a), a$copy,
+#        col = cols[as.numeric(as.character(a$state))], ylim = range, ...)
+#   for (k in 1:nrow(b)){
+#     lines(c(b$start[k], b$end[k]), rep(b$median[k], 2), lwd = 3,
+#           col = "green")
+#   }
+# }
+
+plotParam <- function(mus, lambdas, nu, vars = NULL, likModel = "t", 
+                      jointStates = NULL, subclone = NULL, copy.states = 0:6, ...) {
+  #cols <- stateCols()
+  cols <- c("#00FF00","#006400","#0000FF","#8B0000",rep("#FF0000", 100))
+  cols <- cols[copy.states + 1]
+  
+  domain <- (max(mus) - min(mus)) / 2
+  left <- min(mus) - domain
+  right <- max(mus) + domain
+  x = seq(min(-0.2, left * 2), max(0.2, right * 2), by = 0.01);
+  height = 0
+  K <- length(mus)
+  z <- vector('list', K)
+  for(state in 1:K) {
+    if (likModel == "t"){
+      z[[state]] <- tdistPDF(x, mus[state], lambdas[state], nu);
+      ylab <- "Student-t Density"
+    }else if (grepl("gauss", likModel, ignore.case = TRUE)){
+      if (is.null(var) || is.null(jointStates)){
+        stop("plotParam: likModel is Gaussian but var and/or jointStates are not provided.")
+      }
+      varsToUse <- mean(vars[jointStates == state])
+      z[[state]] <- normalpdf(x, mus[state], varsToUse)
+      ylab <- "Gaussian Density"
+    }
+  }
+  height <- max(unlist(z))
+  
+  plot(c(min(x), max(x)), c(0, height), type = "n", xlab = "Normalized Log2 Ratios",
+       ylab = ylab, ...)
+  
+  for (state in 1:K){
+    if (subclone[state]){ # subclonal
+      lines(x, z[[state]], col = cols[state], lwd = 3, lty = 2)
+    }else{ #not subclonal
+      lines(x, z[[state]], col = cols[state], lwd = 3)
+    }
+  }
+  
 }
 
+plotCovarBias <- function(correctOutput, covar = "gc", 
+                          before = "reads", after = "cor.gc", fit = "gc.fit", 
+                          points = 10000, xlab = "GC content", 
+                          mfrow = c(1,2), ...){
+  if (!is.null(mfrow)){
+    par(mfrow = mfrow)
+  }
+  coutlier = 0.001
+  counts <- as.data.frame(correctOutput$counts)
+  
+  # select points to show (before)
+  set <- which(counts$ideal)
+  #range <- quantile(counts[[before]][counts$ideal], 
+  #                  prob = c(0, 1 - coutlier), na.rm = TRUE)
+  #valid <- which(counts[[before]] >= range[1] & counts[[before]] <= range[2])
+  #set <- intersect(counts$ideal, valid)
+  #select.1 <- sample(valid, min(length(valid), points))
+  select.1 <- sample(set, min(length(set), points))
+  # plot before correction
+  plot(counts[[covar]][select.1], counts[[before]][select.1], 
+       col = densCols(counts[[covar]][select.1], counts[[before]][select.1]), 
+       ylab = "Uncorrected", xlab = xlab, 
+       ...)
+  # plot curve fit line
+  if (!is.null(fit)){ # want to look at fit
+    if (!is.null(correctOutput[[fit]])){ # actually have the fit object/model as list element
+      domain <- c(min(counts[[covar]], na.rm = TRUE), max(counts[[covar]], na.rm = TRUE))
+      fit.covar <- correctOutput[[fit]]
+      i <- seq(domain[1], domain[2], by = 0.001)
+      y <- predict(fit.covar, i)
+      lines(i, y, type="l", lwd=1, col="red")
+    }
+  }
+  
+  # select points to show (after)
+  range <- quantile(counts[[after]][counts$ideal], 
+                    prob = c(0, 1 - coutlier), na.rm = TRUE)
+  valid <- which(counts[[after]] >= range[1] & counts[[after]] <= range[2])
+  select.2 <- intersect(valid, select.1)
+  # plot after correction
+  plot(counts[[covar]][select.2], counts[[after]][select.2], 
+       col = densCols(counts[[covar]][select.2], counts[[after]][select.2]), 
+       ylab = "Corrected", xlab = xlab, 
+       ...)
+}
 
-computeBIC <- function(params){
-  iter <- params$iter
-  KS <- nrow(params$rho) # num states
-  N <- ncol(params$rho) # num data points
-  NP <- nrow(params$n) + nrow(params$phi) # normal + ploidy
-  L <- 1 # precision (lambda)
-  numParams <- KS * (KS - 1) + KS * (L + NP) - 1
-  b <- -2 * params$loglik[iter] + numParams * log(N)
-  return(b)
-} 
+######### INCOMPLETE ############
+## y is the character string for the column to fit the data
+## x is the GRanges object
+data.fit <- function(x, y){
+  ind <- !is.na(values(x)[[y]])
+  x <- x[ind]
+  midpt <- start(ranges(x)) + (end(ranges(x)) - start(ranges(x)))
+  fit <- loess(values(x)[[y]] ~ midpt, span = 0.03)
+  fit.predict <- loess(predict(fit, midpt) ~ midpt, span = 0.3)
+  y.hat <- predict(fit, midpt)
+  return(list(fit = fit, y.hat = y.hat, midpt = midpt))
+}
 
-
-#############################################################
-## function to compute power from ULP-WGS purity/ploidy #####
-#############################################################
-# current assumptions: power for clonal heterozygous mutations
-
+plotFitCompareByChr <- function(x, chr, covar = "repTime", covarName = "Replication Timing",
+                                before = "cor.map", beforeName = "Mappability-Corrected",
+                                after = "cor.rep", afterName = "Replication-Timing-Corrected"){
+  counts.chr <- x$counts[seqnames(x$counts) == chr]
+  #counts.chr <- counts[[1]]$counts[seqnames(counts[[1]]$counts) == chr]
+  
+  fit.map <- data.fit(counts.chr, y = before)
+  midpt <- fit.map$midpt
+  domain <- c(min(midpt, na.rm = TRUE), max(midpt, na.rm = TRUE))
+  xlim <- c(domain[1], domain[2])
+  ylim <- c(min(c(counts.chr$cor.map, counts.chr$repTime), na.rm = TRUE),
+            max(c(counts.chr$cor.map, counts.chr$repTime), na.rm = TRUE))
+  
+  par(mfrow = c(6,1), mar = c(4,6,1,3))
+  
+  # before rep time, after mappability
+  plot(midpt, fit.map$y.hat, type="l", lwd=1, col="red", xlab = paste0("Chromosome ", chr), 
+       ylab = paste0(beforeName, "\nTumor Read Counts"))
+  # after rep time
+  fit.rep <- data.fit(counts.chr, y = after)
+  plot(fit.rep$midpt, fit.rep$y.hat, type="l", lwd=1, col="red", xlab = paste0("Chromosome ", chr), 
+       ylab = paste0(afterName, "\nTumor Read Counts"))
+  if (length(values(counts.chr)[[paste0(before, ".normal")]]) > 0){
+    fit.map.normal <- data.fit(counts.chr, y = paste0(before, ".normal"))
+    plot(fit.map.normal$midpt, fit.map.normal$y.hat, type="l", lwd=1, col="red", xlab = paste0("Chromosome ", chr), 
+         ylab = paste0(beforeName, "\nNormal Read Counts"))
+    fit.rep.normal <- data.fit(counts.chr, y = paste0(after, ".normal"))
+    plot(fit.rep.normal$midpt, fit.rep.normal$y.hat, type="l", lwd=1, col="red", xlab = paste0("Chromosome ", chr), 
+         ylab = paste0(afterName, "\nNormal Read Counts"))
+    fit.copy <- data.fit(counts.chr, y = "copy")
+    plot(fit.copy$midpt, 2^fit.copy$y.hat, type="l", lwd=1, col="blue", xlab = paste0("Chromosome ", chr), 
+         ylab = "Tumour:Normal Read Counts")
+  }
+  
+  # covariance (e.g. gc, repTime)
+  fit.covar <- data.fit(counts.chr, y = covar)
+  covar.midpt <- start(ranges(counts.chr)) + (end(ranges(counts.chr)) - start(ranges(counts.chr)))
+  plot(covar.midpt, values(counts.chr)[[covar]], type = "l", xlab = paste0("Chromosome ", chr), 
+       ylab = covarName)
+  
+}
