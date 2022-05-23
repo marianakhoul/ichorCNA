@@ -77,23 +77,6 @@ plotSolutions <- function(hmmResults.cor, tumour_copy, chrs, outDir, counts,
                                cex = 3, pch = ".", xlab = paste0("Chr", i))
       dev.off()
     }
-    
-    ### PLOT FIT COMPARISON ### only if replication correction was performed
-    if (!is.null(counts[[s]]$counts$cor.rep) && length(counts[[s]]$counts) > 1e4){
-      for (i in chrs){
-        outPlotFile <- paste0(outDir, "/", id, "/", id, "_fit_chr", i)
-        if (plotFileType == "png"){ 
-          outPlotFile <- paste0(outPlotFile, ".png")
-          png(outPlotFile,width=10,height=12,units="in",res=300)
-        }else{
-          outPlotFile <- paste0(outPlotFile, ".pdf")
-          pdf(outPlotFile,width=10,height=12)
-        }
-        plotFitCompareByChr(counts[[s]], chr = i, covar = "repTime", covarName = "Replication Timing",
-                                        before = "cor.map", beforeName = "Mappability-Corrected",
-                                        after = "cor.rep", afterName = "Replication-Timing-Corrected")
-        dev.off()
-      }
     }
 
     ### PLOT THE BIAS ###
