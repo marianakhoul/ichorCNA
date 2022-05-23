@@ -115,7 +115,6 @@ plotSolutions <- function(hmmResults.cor, tumour_copy, chrs, outDir, counts,
               nu = hmmResults.cor$results$param$nu, copy.states = hmmResults.cor$results$param$ct)
     dev.off()
   }
-}
 
 
 plotGWSolution <- function(hmmResults.cor, s, outPlotFile, plotFileType="pdf", 
