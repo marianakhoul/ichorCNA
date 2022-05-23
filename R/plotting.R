@@ -579,8 +579,16 @@ plotCovarBias <- function(correctOutput, covar = "gc",
 ## y is the character string for the column to fit the data
 ## x is the GRanges object
 data.fit <- function(x, y){
+  print("Printing X \n")
+  print(x)
+  print("Printing Y \n")
+  print(y)
   ind <- !is.na(values(x)[[y]])
+  print("Printing ind \n")
+  print(ind)
   x <- x[ind]
+  print("Printing X \n")
+  print(x)
   midpt <- start(ranges(x)) + (end(ranges(x)) - start(ranges(x)))
   fit <- loess(values(x)[[y]] ~ midpt, span = 0.03)
   fit.predict <- loess(predict(fit, midpt) ~ midpt, span = 0.3)
@@ -591,6 +599,10 @@ data.fit <- function(x, y){
 plotFitCompareByChr <- function(x, chr, covar = "repTime", covarName = "Replication Timing",
                                 before = "cor.map", beforeName = "Mappability-Corrected",
                                 after = "cor.rep", afterName = "Replication-Timing-Corrected"){
+  print("Printing X \n")
+  print(x)
+  print("Printing chr \n")
+  print(chr)
   counts.chr <- x$counts[seqnames(x$counts) == chr]
   #counts.chr <- counts[[1]]$counts[seqnames(counts[[1]]$counts) == chr]
   
