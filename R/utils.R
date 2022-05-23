@@ -117,6 +117,24 @@ plotSolutions <- function(hmmResults.cor, tumour_copy, chrs, outDir, counts,
   }
 
 
+####################################
+##### FUNCTION GET SEQINFO ######
+####################################
+getSeqInfo <- function(genomeBuild = "hg19", genomeStyle = "NCBI", chrs = c(1:22, "X")){
+	bsg <- paste0("BSgenome.Hsapiens.UCSC.", genomeBuild)
+	if (!require(bsg, character.only=TRUE, quietly=TRUE, warn.conflicts=FALSE)) {
+		seqinfo <- Seqinfo(genome=genomeBuild)
+	} else {
+		seqinfo <- seqinfo(get(bsg))
+	}
+	chrs <- as.character(chrs)
+	seqlevelsStyle(seqinfo) <- genomeStyle
+	seqlevelsStyle(chrs) <- genomeStyle
+	seqinfo <- keepSeqlevels(seqinfo, value = chrs)
+	#seqinfo <- cbind(seqnames = seqnames(seqinfo), as.data.frame(seqinfo))
+	return(seqinfo)	
+}
+
 plotGWSolution <- function(hmmResults.cor, s, outPlotFile, plotFileType="pdf", 
 						   logR.column = "logR", call.column = "event",
 						   seqinfo = NULL, plotSegs = TRUE, 
